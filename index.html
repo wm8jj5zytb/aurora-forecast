@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aurora Forecast — Prototype</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://api-maps.yandex.ru/2.1/?lang=ru_RU" type="text/javascript"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-plugins@3.4.0/layer/tile/Yandex.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; background: #0f0f1a; overflow: hidden; }
+
+        #tabs { display: flex; background: #0d0d1a; border-bottom: 2px solid #e94560; }
+        .tab { padding: 12px 24px; color: #888; cursor: pointer; font-weight: bold; font-size: 14px; transition: all 0.2s; border-bottom: 3px solid transparent; }
+        .tab:hover { color: #ccc; }
+        .tab.active { color: #fff; border-bottom-color: #e94560; background: #1a1a2e; }
+
+        #controls { padding: 10px 15px; background: #1a1a2e; color: white; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        #controls input { padding: 6px 8px; border-radius: 6px; border: 1px solid #333; background: #2a2a4a; color: white; width: 80px; font-size: 13px; }
+        #controls button { padding: 7px 14px; background: #e94560; border: none; color: white; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; }
+        #controls button:hover { background: #c73e54; }
+        #controls button.secondary { background: #457b9d; }
+        #controls button.secondary:hover { background: #35617d; }
+
+        #kp-forecast { padding: 8px 15px; background: #0d0d1a; color: #ccc; font-size: 12px; font-family: monospace; border-top: 1px solid #222; }
+
+        #map, #map2 { flex-grow: 1; background: #000; }
+
+        #result, #result2 { padding: 10px 15px; background: #16213e; color: white; font-size: 14px; border-top: 2px solid #e94560; min-height: 70px; }
+        #result .prob, #result2 .prob { font-size: 1.8em; font-weight: bold; }
+        .good { color: #4ade80; }
+        .low { color: #facc15; }
+        .none { color: #94a3b8; }
+        .meta { font-size: 0.75em; color: #888; margin-top: 4px; }
+
+        .tab-content { display: none; flex-direction: column; flex-grow: 1; overflow: hidden; }
+        .tab-content.active { display: flex; }
+    </style>
+</head>
+<body>
+
+<div id="tabs">
+    <div class="tab active" onclick="switchTab('now')">🕐 Сейчас</div>
+    <div class="tab" onclick="switchTab('forecast')">📅 3 дня</div>
+</div>
+
+<!-- Вкладка 1 -->
+<div id="tab-now" class="tab-content active">
+    <div id="controls">
+        <label>Lat: <input type="number" id="lat" value="69.65" step="0.1"></label>
+        <label>Lon: <input type="number" id="lon" value="18.96" step="0.1"></label>
+        <button onclick="checkAurora()">Проверить точку</button>
+        <button onclick="toggleOval()" id="ovalBtn" class="secondary">Показать овал</button>
+        <span style="margin-left:auto; font-size:0.7em; color:#666;">NOAA OVATION · обновление 5 мин</span>
+    </div>
+
+    <div id="map"></div>
+    <div id="result">
+        <div id="status">Кликните по карте или введите координаты</div>
+    </div>
+</div>
+
+<!-- Вкладка 2 -->
+<div id="tab-forecast" class="tab-content">
+    <div id="controls">
+        <label>Lat: <input type="number" id="lat2" value="69.65" step="0.1"></label>
+        <label>Lon: <input type="number" id="lon2" value="18.96" step="0.1"></label>
+        <button onclick="updateForecastPoint()">Проверить точку</button>
+        <span style="margin-left:auto; font-size:0.7em; color:#666;">Прогноз Kp от NOAA · эмпирическая оценка</span>
+    </div>
+
+    <div id="kp-forecast">
+        <span style="color:#666;">Загрузка прогноза Kp...</span>
+    </div>
+
+    <div id="slider-container" style="padding: 10px 15px; background: #0d0d1a; color: #ccc; display: flex; align-items: center; gap: 12px; font-size: 13px; border-top: 1px solid #222;">
+        <span>Время:</span>
+        <input type="range" id="forecast-slider" min="0" max="23" value="0" step="1" oninput="onForecastSliderChange()" style="flex-grow:1; accent-color:#e94560;">
+        <span id="forecast-slider-label" style="min-width:200px; font-family:monospace; font-weight:bold; color:#fff;">Сейчас</span>
+    </div>
+
+    <div id="map2" style="flex-grow:1; background:#000;"></div>
+    <div id="result2" style="padding: 10px 15px; background: #16213e; color: white; font-size: 14px; border-top: 2px solid #e94560; min-height: 70px;">
+        <div id="status2">Выберите точку и двигайте ползунок</div>
+    </div>
+</div>
+
+<script>
+let map, map2;
+let marker = null, marker2 = null;
+let ovalLayer = null;
+let ovalVisible = false;
+let lastGridData = null;
+
+let kpForecast = null;
+let forecastBlocks = [];
+
+function switchTab(tab) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+
+    const tabs = ['now', 'forecast'];
+    const tabContents = ['tab-now', 'tab-forecast'];
+    const maps = [map, map2];
+
+    const index = tabs.indexOf(tab);
+    document.querySelectorAll('.tab')[index].classList.add('active');
+    document.getElementById(tabContents[index]).classList.add('active');
+
+    if (maps[index]) setTimeout(() => maps[index].invalidateSize(), 100);
+}
+
+function initMaps() {
+    map = L.map('map', {
+        center: [67.6755, 33.936],
+        zoom: 5,
+        attributionControl: false,
+        crs: L.CRS.EPSG3395
+    });
+    L.yandex('yandex#map').addTo(map);
+
+    map.on('click', function(e) {
+        document.getElementById('lat').value = e.latlng.lat.toFixed(2);
+        document.getElementById('lon').value = e.latlng.lng.toFixed(2);
+        checkAurora();
+    });
+
+    map2 = L.map('map2', {
+        center: [67.6755, 33.936],
+        zoom: 5,
+        attributionControl: false,
+        crs: L.CRS.EPSG3395
+    });
+    L.yandex('yandex#map').addTo(map2);
+
+    map2.on('click', function(e) {
+        document.getElementById('lat2').value = e.latlng.lat.toFixed(2);
+        document.getElementById('lon2').value = e.latlng.lng.toFixed(2);
+        updateForecastPoint();
+    });
+}
+
+// === Вкладка 1: Сейчас ===
+async function fetchOvationGrid() {
+    const url = 'https://services.swpc.noaa.gov/json/ovation_aurora_latest.json';
+    try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.json();
+    } catch (error) {
+        console.error('Ошибка NOAA OVATION:', error);
+        return null;
+    }
+}
+
+function findProbabilityForPoint(gridData, lat, lon) {
+    if (!gridData || !gridData.coordinates) return null;
+    let bestMatch = null;
+    let minDistance = Infinity;
+    for (const point of gridData.coordinates) {
+        const [pointLon, pointLat, prob] = point;
+        const distance = Math.sqrt(Math.pow(pointLon - lon, 2) + Math.pow(pointLat - lat, 2));
+        if (distance < minDistance) {
+            minDistance = distance;
+            bestMatch = { lat: pointLat, lon: pointLon, probability: prob };
+        }
+    }
+    return bestMatch;
+}
+
+function drawOval(gridData) {
+    if (ovalLayer) map.removeLayer(ovalLayer);
+    ovalLayer = L.layerGroup();
+
+    const activePoints = gridData.coordinates.filter(p => p[2] >= 10);
+
+    for (const point of activePoints) {
+        const [lon, lat, prob] = point;
+        const color = prob >= 50 ? '#4ade80' : prob >= 25 ? '#facc15' : '#3b82f6';
+        const radius = prob >= 50 ? 6 : prob >= 25 ? 5 : 4;
+
+        L.circleMarker([lat, lon], {
+            radius: radius, color: color, fillColor: color,
+            fillOpacity: 0.4, weight: 0
+        }).addTo(ovalLayer);
+    }
+
+    ovalLayer.addTo(map);
+    return activePoints.length;
+}
+
+function toggleOval() {
+    if (!lastGridData) return;
+    ovalVisible = !ovalVisible;
+    if (ovalVisible) {
+        const count = drawOval(lastGridData);
+        document.getElementById('ovalBtn').textContent = `Скрыть овал (${count})`;
+        document.getElementById('ovalBtn').classList.remove('secondary');
+    } else {
+        if (ovalLayer) map.removeLayer(ovalLayer);
+        document.getElementById('ovalBtn').textContent = 'Показать овал';
+        document.getElementById('ovalBtn').classList.add('secondary');
+    }
+}
+
+async function checkAurora() {
+    const lat = parseFloat(document.getElementById('lat').value);
+    const lon = parseFloat(document.getElementById('lon').value);
+    const statusDiv = document.getElementById('status');
+
+    statusDiv.innerHTML = '⏳ Запрос к NOAA...';
+
+    if (marker) map.removeLayer(marker);
+    marker = L.marker([lat, lon]).addTo(map);
+    map.setView([lat, lon], 6);
+
+    const gridData = await fetchOvationGrid();
+    if (!gridData) {
+        statusDiv.innerHTML = '❌ Не удалось получить данные от NOAA. Попробуйте позже.';
+        return;
+    }
+
+    lastGridData = gridData;
+    const result = findProbabilityForPoint(gridData, lat, lon);
+
+    if (result) {
+        const prob = result.probability;
+        let verdict = '', cssClass = '';
+        if (prob >= 50) { verdict = 'Хороший шанс!'; cssClass = 'good'; }
+        else if (prob >= 20) { verdict = 'Возможно'; cssClass = 'low'; }
+        else { verdict = 'Маловероятно'; cssClass = 'none'; }
+
+        const now = new Date().toLocaleTimeString('ru-RU');
+        statusDiv.innerHTML = `
+            <div>Вероятность для (${lat.toFixed(2)}, ${lon.toFixed(2)}):</div>
+            <div class="prob ${cssClass}">${prob}% — ${verdict}</div>
+            <div class="meta">Точка: ${result.lat}°N, ${result.lon}°E · ${now}</div>
+        `;
+
+        if (ovalVisible) {
+            const count = drawOval(gridData);
+            document.getElementById('ovalBtn').textContent = `Скрыть овал (${count})`;
+        }
+    } else {
+        statusDiv.innerHTML = 'Точка не найдена в сетке OVATION';
+    }
+}
+
+// === Вкладка 2: Прогноз Kp ===
+async function fetch3DayKpForecast() {
+    const url = 'https://services.swpc.noaa.gov/text/3-day-forecast.txt';
+    try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const text = await response.text();
+        return parseKpForecast(text);
+    } catch (error) {
+        console.error('Ошибка загрузки Kp-прогноза:', error);
+        return null;
+    }
+}
+
+function parseKpForecast(text) {
+    const lines = text.split('\n');
+    const forecast = { days: [] };
+    let inKpSection = false;
+    let dateColumns = [];
+
+    for (const line of lines) {
+        if (line.includes('NOAA Kp index breakdown')) {
+            inKpSection = true;
+            continue;
+        }
+
+        if (inKpSection) {
+            const dateMatch = line.match(/([A-Z][a-z]{2}\s+\d{2})/g);
+            if (dateMatch && dateMatch.length >= 3) {
+                dateColumns = dateMatch;
+                forecast.days = dateColumns.map(d => ({ date: d, kpValues: [] }));
+                continue;
+            }
+
+            const dataMatch = line.match(/^(\d{2})-(\d{2})UT\s+(.+)$/);
+            if (dataMatch && dateColumns.length > 0) {
+                const blockStart = parseInt(dataMatch[1]);
+                const values = dataMatch[3].trim().split(/\s+/).map(v => parseFloat(v)).filter(v => !isNaN(v));
+                values.forEach((kp, idx) => {
+                    if (idx < forecast.days.length) {
+                        forecast.days[idx].kpValues.push({ hour: blockStart, kp: kp });
+                    }
+                });
+            }
+
+            if (line.includes('Rationale:') || line.includes('B. NOAA Solar Radiation')) {
+                if (forecast.days.length > 0) break;
+            }
+        }
+    }
+    return forecast;
+}
+
+function buildForecastBlocks(forecast) {
+    const blocks = [];
+    if (!forecast || !forecast.days) return blocks;
+
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    forecast.days.forEach((day, dayIdx) => {
+        day.kpValues.forEach(block => {
+            const blockDate = new Date(todayStart);
+            blockDate.setDate(blockDate.getDate() + dayIdx);
+            blockDate.setHours(block.hour, 0, 0, 0);
+
+            blocks.push({
+                time: blockDate,
+                kp: block.kp,
+                label: blockDate.toLocaleString('ru-RU', {
+                    day: '2-digit', month: '2-digit',
+                    hour: '2-digit', minute: '2-digit'
+                })
+            });
+        });
+    });
+
+    return blocks.sort((a, b) => a.time - b.time);
+}
+
+function estimateProbability(kp, geoLat) {
+    const magLat = geoLat - 3;
+    const ovalBoundary = 66 - (kp * 1.5);
+    const diff = magLat - ovalBoundary;
+
+    if (diff >= 2) return { prob: 85, verdict: 'Высокая', cssClass: 'good' };
+    if (diff >= 0) return { prob: 60, verdict: 'Средняя', cssClass: 'good' };
+    if (diff >= -2) return { prob: 35, verdict: 'Низкая', cssClass: 'low' };
+    if (diff >= -4) return { prob: 15, verdict: 'Очень низкая', cssClass: 'none' };
+    return { prob: 5, verdict: 'Маловероятно', cssClass: 'none' };
+}
+
+function updateForecastPoint() {
+    if (forecastBlocks.length === 0) return;
+
+    const lat = parseFloat(document.getElementById('lat2').value);
+    const lon = parseFloat(document.getElementById('lon2').value);
+
+    if (marker2) map2.removeLayer(marker2);
+    marker2 = L.marker([lat, lon]).addTo(map2);
+    map2.setView([lat, lon], 6);
+
+    onForecastSliderChange();
+}
+
+function onForecastSliderChange() {
+    const slider = document.getElementById('forecast-slider');
+    const idx = parseInt(slider.value);
+    const label = document.getElementById('forecast-slider-label');
+    const statusDiv = document.getElementById('status2');
+
+    if (forecastBlocks.length === 0) {
+        label.textContent = 'Загрузка...';
+        return;
+    }
+
+    const block = forecastBlocks[idx];
+    if (!block) return;
+
+    label.textContent = block.label;
+
+    const lat = parseFloat(document.getElementById('lat2').value);
+    const lon = parseFloat(document.getElementById('lon2').value);
+
+    const est = estimateProbability(block.kp, lat);
+
+    statusDiv.innerHTML = `
+        <div>Прогноз для (${lat.toFixed(2)}, ${lon.toFixed(2)}) на <strong>${block.label}</strong>:</div>
+        <div class="prob ${est.cssClass}">${est.prob}% — ${est.verdict}</div>
+        <div class="meta">Kp: ${block.kp} · Оценка на основе Kp-прогноза NOAA · Не учитывает облачность</div>
+    `;
+}
+
+async function updateKpForecast() {
+    const panel = document.getElementById('kp-forecast');
+    const forecast = await fetch3DayKpForecast();
+
+    if (!forecast || forecast.days.length === 0) {
+        panel.innerHTML = '<span style="color:#e94560;">⚠️ Не удалось загрузить прогноз Kp</span>';
+        return;
+    }
+
+    kpForecast = forecast;
+    forecastBlocks = buildForecastBlocks(forecast);
+
+    const slider = document.getElementById('forecast-slider');
+    slider.max = forecastBlocks.length - 1;
+    slider.value = 0;
+
+    let html = '<strong style="color:#fff;">Максимум Kp по дням:</strong> ';
+    forecast.days.forEach(day => {
+        const maxKp = Math.max(...day.kpValues.map(b => b.kp));
+        let color = '#94a3b8';
+        if (maxKp >= 6) color = '#4ade80';
+        else if (maxKp >= 5) color = '#a3e635';
+        else if (maxKp >= 4) color = '#facc15';
+        else if (maxKp >= 3) color = '#fb923c';
+
+        html += `<span style="color:${color}; margin-right:16px; font-weight:bold;">`;
+        html += `${day.date}: Kp ${maxKp.toFixed(1)}`;
+        html += `</span>`;
+    });
+    panel.innerHTML = html;
+
+    onForecastSliderChange();
+}
+
+// === Запуск ===
+window.addEventListener('load', () => {
+    initMaps();
+
+    checkAurora();
+    setInterval(checkAurora, 300000);
+
+    updateKpForecast();
+    setInterval(updateKpForecast, 3600000);
+});
+</script>
+
+</body>
+</html>
